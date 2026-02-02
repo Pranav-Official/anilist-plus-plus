@@ -3,11 +3,13 @@ import { SeadexApi } from "./seadex_api";
 import {
     renderSeadexPanel,
     ensureSeadexPanelPlacement,
-    renderNyaaPanel,
-    ensureNyaaPanelPlacement,
     SEADEX_PANEL_ID,
-    NYAA_PANEL_ID,
 } from "./render_panels";
+import {
+    injectEpisodeCarousel,
+    removeEpisodeCarousel,
+    closeEpisodeModal,
+} from "./episode_carousel";
 
 const seadexApi = new SeadexApi();
 
@@ -29,16 +31,14 @@ async function tryInject(): Promise<void> {
 
     // 1. If not an anime page or no ID, clean up everything
     if (!isAnime || !id) {
-        document.querySelectorAll(`#${SEADEX_PANEL_ID}, #${NYAA_PANEL_ID}`).forEach((node) => node.remove());
+        document.querySelectorAll(`#${SEADEX_PANEL_ID}`).forEach((node) => node.remove());
+        removeEpisodeCarousel();
         return;
     }
 
     // 2. Remove panels if they belong to a different anime
     const seadexPanel = document.getElementById(SEADEX_PANEL_ID);
     if (seadexPanel && seadexPanel.dataset.anilistId !== String(id)) seadexPanel.remove();
-
-    const nyaaPanel = document.getElementById(NYAA_PANEL_ID);
-    if (nyaaPanel && nyaaPanel.dataset.anilistId !== String(id)) nyaaPanel.remove();
 
     // 3. Ensure Seadex Panel
     if (!document.getElementById(SEADEX_PANEL_ID) && injectionState.inFlightId !== id) {
@@ -56,11 +56,8 @@ async function tryInject(): Promise<void> {
     }
     ensureSeadexPanelPlacement(id);
 
-    // 4. Ensure Nyaa Panel
-    if (!document.getElementById(NYAA_PANEL_ID)) {
-        await renderNyaaPanel(id);
-    }
-    ensureNyaaPanelPlacement(id);
+    // 4. Ensure Episode Carousel
+    injectEpisodeCarousel(id);
 }
 
 // Debounce injections
@@ -82,7 +79,6 @@ function observePageContent(): void {
         scheduleTryInject();
         const currentId = getAnilistId();
         ensureSeadexPanelPlacement(currentId);
-        ensureNyaaPanelPlacement(currentId);
     });
     injectionState.contentObserver.observe(target, { childList: true, subtree: true });
 
@@ -109,5 +105,12 @@ function setupRootObserver(): void {
 
     observePageContent();
 }
+
+// Close modal on escape key
+document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+        closeEpisodeModal();
+    }
+});
 
 setupRootObserver();
