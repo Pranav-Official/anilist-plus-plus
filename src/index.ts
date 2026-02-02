@@ -57,7 +57,7 @@ async function tryInject(): Promise<void> {
     ensureSeadexPanelPlacement(id);
 
     // 4. Ensure Episode Carousel
-    injectEpisodeCarousel(id);
+    await injectEpisodeCarousel(id);
 }
 
 // Debounce injections

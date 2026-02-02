@@ -1,5 +1,6 @@
 import type { NyaaMetadata, NyaaFileEntry } from "./nyaa_scraper";
 import { AnidbIdApi, type Episode } from "./anidb_id_api";
+import { AnilistApi } from "./anilist_api";
 
 // ==========================================
 // Types & Interfaces
@@ -9,6 +10,7 @@ interface AnimeInfo {
 	episodes: number;
 	status: "FINISHED" | "RELEASING" | "NOT_YET_RELEASED" | "CANCELLED" | "HIATUS";
 	currentAiringEpisode?: number;
+	userWatchedEpisodes?: number;
 }
 
 interface NyaaMetadataEnhanced extends NyaaMetadata {
@@ -81,13 +83,27 @@ export function extractAnimeInfoFromDOM(): AnimeInfo | null {
 		}
 	}
 
+	// Try to find user's watched episode progress
+	let userWatchedEpisodes: number | undefined;
+	
+	// Look for progress in the actions/list area
+	const actionsContainer = document.querySelector('.actions');
+	if (actionsContainer) {
+		// Check for progress text like "4/12" or similar patterns
+		const progressText = actionsContainer.textContent || '';
+		const progressMatch = progressText.match(/(\d+)\s*\/\s*(\d+)/);
+		if (progressMatch) {
+			userWatchedEpisodes = parseInt(progressMatch[1], 10);
+		}
+	}
+
 	if (episodes === 0 && status !== 'NOT_YET_RELEASED') {
 		// If no episodes found but status is not "not yet released", might be a movie or special
 		// Set episodes to 1 for those cases
 		episodes = 1;
 	}
 
-	return { episodes, status, currentAiringEpisode };
+	return { episodes, status, currentAiringEpisode, userWatchedEpisodes };
 }
 
 function calculateAvailableEpisodes(info: AnimeInfo): number {
@@ -143,7 +159,7 @@ const CAROUSEL_ID = 'episode-carousel';
 const MODAL_ID = 'episode-results-modal';
 const MODAL_OVERLAY_ID = 'episode-results-overlay';
 
-export function injectEpisodeCarousel(anilistId: number): void {
+export async function injectEpisodeCarousel(anilistId: number): Promise<void> {
 	const animeInfo = extractAnimeInfoFromDOM();
 	if (!animeInfo || animeInfo.episodes === 0) {
 		console.log('EpisodeCarousel: No episode info found');
@@ -156,7 +172,11 @@ export function injectEpisodeCarousel(anilistId: number): void {
 		return;
 	}
 
-	// Remove existing carousel if it exists for a different anime or episode count changed
+	// Fetch user progress first to determine if we need to recreate
+	const anilistApi = new AnilistApi();
+	const userProgress = await anilistApi.getUserProgress(anilistId);
+	
+	// Remove existing carousel if it exists for a different anime or data changed
 	const existing = document.getElementById(CAROUSEL_ID);
 	if (existing) {
 		if (existing.dataset.anilistId !== String(anilistId)) {
@@ -166,8 +186,12 @@ export function injectEpisodeCarousel(anilistId: number): void {
 			// Same anime but episode count changed, update it
 			console.log(`EpisodeCarousel: Episode count changed from ${existing.dataset.totalEpisodes} to ${availableEpisodes}, updating...`);
 			existing.remove();
+		} else if (existing.dataset.userProgress !== String(userProgress ?? '')) {
+			// Same anime but user progress changed, update it
+			console.log(`EpisodeCarousel: User progress changed from ${existing.dataset.userProgress} to ${userProgress}, updating...`);
+			existing.remove();
 		} else {
-			// Same anime, same episode count, don't recreate
+			// Same anime, same data, don't recreate
 			return;
 		}
 	}
@@ -177,6 +201,7 @@ export function injectEpisodeCarousel(anilistId: number): void {
 	carousel.id = CAROUSEL_ID;
 	carousel.dataset.anilistId = String(anilistId);
 	carousel.dataset.totalEpisodes = String(availableEpisodes);
+	carousel.dataset.userProgress = String(userProgress ?? '');
 	carousel.style.cssText = `
 		margin: 1.5rem 0;
 		padding: 1rem 0;
@@ -269,9 +294,9 @@ export function injectEpisodeCarousel(anilistId: number): void {
 		contentDiv.appendChild(carousel);
 	}
 
-	// Load episode titles and render first page
+	// Load episode titles and render
 	loadEpisodeTitles(anilistId).then((titles) => {
-		renderEpisodePage(availableEpisodes, titles, 0, anilistId);
+		renderEpisodePage(availableEpisodes, titles, 0, anilistId, userProgress);
 	});
 }
 
@@ -308,8 +333,13 @@ function changePage(direction: number, totalEpisodes: number): void {
 	carouselState.currentPage = newPage;
 
 	const anilistId = parseInt(document.getElementById(CAROUSEL_ID)?.dataset.anilistId || '0', 10);
-	loadEpisodeTitles(anilistId).then((titles) => {
-		renderEpisodePage(totalEpisodes, titles, newPage, anilistId);
+	const anilistApi = new AnilistApi();
+	
+	Promise.all([
+		loadEpisodeTitles(anilistId),
+		anilistApi.getUserProgress(anilistId)
+	]).then(([titles, userProgress]) => {
+		renderEpisodePage(totalEpisodes, titles, newPage, anilistId, userProgress);
 	});
 }
 
@@ -317,7 +347,8 @@ function renderEpisodePage(
 	totalEpisodes: number,
 	titles: Map<number, string>,
 	page: number,
-	anilistId: number
+	anilistId: number,
+	userWatchedEpisodes?: number | null
 ): void {
 	const grid = document.getElementById('episode-grid');
 	const pageInfo = document.getElementById('episode-page-info');
@@ -336,7 +367,8 @@ function renderEpisodePage(
 	for (let i = start; i < end; i++) {
 		const episodeNum = i + 1;
 		const title = titles.get(episodeNum) || '';
-		const card = createEpisodeCard(episodeNum, title, anilistId);
+		const isWatched = userWatchedEpisodes !== null && userWatchedEpisodes !== undefined && episodeNum <= userWatchedEpisodes;
+		const card = createEpisodeCard(episodeNum, title, anilistId, isWatched);
 		grid.appendChild(card);
 	}
 
@@ -356,12 +388,17 @@ function renderEpisodePage(
 	}
 }
 
-function createEpisodeCard(episodeNum: number, title: string, anilistId: number): HTMLElement {
+function createEpisodeCard(episodeNum: number, title: string, anilistId: number, isWatched: boolean = false): HTMLElement {
 	const card = document.createElement('div');
 	card.className = 'episode-card';
+	
+	// Use muted green border if watched, otherwise default
+	const borderColor = isWatched ? '#7CB342' : 'rgba(var(--color-foreground-rgb, 92,114,138), 0.15)';
+	const borderWidth = isWatched ? '2px' : '1px';
+	
 	card.style.cssText = `
 		background: rgba(var(--color-foreground-rgb, 92,114,138), 0.05);
-		border: 1px solid rgba(var(--color-foreground-rgb, 92,114,138), 0.15);
+		border: ${borderWidth} solid ${borderColor};
 		border-radius: 8px;
 		padding: 1rem;
 		cursor: pointer;
@@ -405,6 +442,28 @@ function createEpisodeCard(episodeNum: number, title: string, anilistId: number)
 		card.appendChild(epTitle);
 	}
 
+	// Add checkmark for watched episodes
+	if (isWatched) {
+		const checkmark = document.createElement('div');
+		checkmark.textContent = '✓';
+		checkmark.style.cssText = `
+			position: absolute;
+			bottom: 4px;
+			right: 4px;
+			width: 20px;
+			height: 20px;
+			background: #7CB342;
+			color: white;
+			border-radius: 50%;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			font-size: 12px;
+			font-weight: bold;
+		`;
+		card.appendChild(checkmark);
+	}
+
 	// Hover effects
 	card.addEventListener('mouseenter', () => {
 		card.style.background = 'rgba(var(--color-foreground-rgb, 92,114,138), 0.1)';
@@ -414,7 +473,7 @@ function createEpisodeCard(episodeNum: number, title: string, anilistId: number)
 
 	card.addEventListener('mouseleave', () => {
 		card.style.background = 'rgba(var(--color-foreground-rgb, 92,114,138), 0.05)';
-		card.style.borderColor = 'rgba(var(--color-foreground-rgb, 92,114,138), 0.15)';
+		card.style.borderColor = isWatched ? '#7CB342' : 'rgba(var(--color-foreground-rgb, 92,114,138), 0.15)';
 		card.style.transform = 'translateY(0)';
 	});
 
